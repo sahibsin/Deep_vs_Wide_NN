@@ -1,5 +1,3 @@
-  
-'''Train CIFAR10 with PyTorch.'''
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,13 +10,15 @@ import torchvision.transforms as transforms
 import os
 import argparse
 
+from opacus import PrivacyEngine
 from resnet import *
-from utils import progress_bar
+from utils import progress_bar, convert_layers
 
 
-parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
+parser = argparse.ArgumentParser()
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
 parser.add_argument('--model', default="resnet50", help='model name')
+parser.add_argument('--dp', default=None, help='model name')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
 args = parser.parse_args()
 
@@ -40,6 +40,7 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
+## Loading CIFAR10
 trainset = torchvision.datasets.CIFAR10(
     root='./data', train=True, download=True, transform=transform_train)
 trainloader = torch.utils.data.DataLoader(
@@ -56,15 +57,14 @@ classes = ('plane', 'car', 'bird', 'cat', 'deer',
 # Model
 print('==> Building model..', args.model)
 
-#Select Model
-
-net = resnet50()
+# Select Model
+models = resnet50()
 if args.model == "wide_resnet50_2":
-    net = wide_resnet50_2()
-print ("net", net)
-net = net.to(device)
+    model = wide_resnet50_2()
+
+model = model.to(device)
 if device == 'cuda':
-    net = torch.nn.DataParallel(net)
+    model = torch.nn.DataParallel(model)
     cudnn.benchmark = True
 
 if args.resume:
@@ -72,26 +72,41 @@ if args.resume:
     print('==> Resuming from checkpoint..')
     assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
     checkpoint = torch.load('./checkpoint/ckpt.pth')
-    net.load_state_dict(checkpoint['net'])
+    model.load_state_dict(checkpoint['model'])
     best_acc = checkpoint['acc']
     start_epoch = checkpoint['epoch']
 
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(net.parameters(), lr=args.lr,
+optimizer = optim.SGD(model.parameters(), lr=args.lr,
                       momentum=0.9, weight_decay=5e-4)
+
+# ToDo confirm batch_size and sample_size
+batch_size=sample_size=128
+if args.dp:
+    model = convert_layers(model, nn.BatchNorm2d, nn.GroupNorm, True, num_groups=2)
+    print ("Running DP Model with multiplier =", args.dp)
+    privacy_engine = PrivacyEngine(
+    model,
+    batch_size,
+    sample_size,
+    alphas=[10, 100],
+    noise_multiplier=args.dp,
+    max_grad_norm=1.0,
+    )
+    privacy_engine.attach(optimizer)
 
 
 # Training
 def train(epoch):
     print('\nEpoch: %d' % epoch)
-    net.train()
+    model.train()
     train_loss = 0
     correct = 0
     total = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
-        outputs = net(inputs)
+        outputs = model(inputs)
         loss = criterion(outputs, targets)
         loss.backward()
         optimizer.step()
@@ -107,14 +122,14 @@ def train(epoch):
 
 def test(epoch):
     global best_acc
-    net.eval()
+    model.eval()
     test_loss = 0
     correct = 0
     total = 0
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(testloader):
             inputs, targets = inputs.to(device), targets.to(device)
-            outputs = net(inputs)
+            outputs = model(inputs)
             loss = criterion(outputs, targets)
 
             test_loss += loss.item()
@@ -130,7 +145,7 @@ def test(epoch):
     if acc > best_acc:
         print('Saving..')
         state = {
-            'net': net.state_dict(),
+            'model': model.state_dict(),
             'acc': acc,
             'epoch': epoch,
         }
