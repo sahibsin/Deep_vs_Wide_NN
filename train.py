@@ -58,7 +58,7 @@ classes = ('plane', 'car', 'bird', 'cat', 'deer',
 print('==> Building model..', args.model)
 
 # Select Model
-models = resnet50()
+model = resnet50()
 if args.model == "wide_resnet50_2":
     model = wide_resnet50_2()
 
